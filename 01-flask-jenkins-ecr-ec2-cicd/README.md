@@ -1,4 +1,4 @@
-# Flask CI/CD: Jenkins → Docker → AWS ECR → EC2 Deploy (Interview-Strong)
+# Flask CI/CD: Jenkins → Docker → AWS ECR → EC2 Deploy
 
 This repository demonstrates an end-to-end **CI/CD pipeline** for a Python Flask API:
 - Code in GitHub
