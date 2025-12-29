@@ -1,0 +1,122 @@
+pipeline {
+  agent any
+
+  environment {
+    AWS_REGION = credentials('aws_region')  // or set as plain env var
+    ECR_REPO_URI = credentials('ecr_repo_uri')
+    EC2_HOST = credentials('ec2_host')
+    EC2_USER = 'ubuntu'
+  }
+
+  options {
+    timestamps()
+  }
+
+  stages {
+    stage('Checkout') {
+      steps {
+        checkout scm
+        script {
+          COMMIT_SHA = sh(returnStdout: true, script: "git rev-parse --short HEAD").trim()
+          IMAGE_URI = "${ECR_REPO_URI}:${COMMIT_SHA}"
+        }
+      }
+    }
+
+    stage('Python Setup') {
+      steps {
+        sh '''
+          python3 -m venv .venv
+          . .venv/bin/activate
+          pip install -r app/requirements.txt -r app/requirements-dev.txt
+        '''
+      }
+    }
+
+    stage('Lint') {
+      steps {
+        sh '''
+          . .venv/bin/activate
+          flake8 app tests
+        '''
+      }
+    }
+
+    stage('Unit Tests') {
+      steps {
+        sh '''
+          . .venv/bin/activate
+          pytest -q
+        '''
+      }
+    }
+
+    stage('Dependency Audit') {
+      steps {
+        sh '''
+          . .venv/bin/activate
+          pip-audit -r app/requirements.txt || true
+        '''
+      }
+    }
+
+    stage('Build Image') {
+      steps {
+        sh 'docker build -t "$IMAGE_URI" .'
+      }
+    }
+
+    stage('Image Scan (Trivy)') {
+      steps {
+        sh '''
+          if ! command -v trivy >/dev/null 2>&1; then
+            echo "Trivy not found. Install it on Jenkins agent to enable image scanning."
+          else
+            trivy image --exit-code 0 --severity HIGH,CRITICAL "$IMAGE_URI"
+          fi
+        '''
+      }
+    }
+
+    stage('Push to ECR') {
+      steps {
+        withCredentials([[$class: 'AmazonWebServicesCredentialsBinding', credentialsId: 'aws_creds']]) {
+          sh '''
+            export AWS_REGION="$AWS_REGION"
+            export ECR_REPO_URI="$ECR_REPO_URI"
+            bash scripts/ecr_login.sh
+            docker push "$IMAGE_URI"
+          '''
+        }
+      }
+    }
+
+    stage('Deploy to EC2') {
+      steps {
+        sshagent(credentials: ['ec2_ssh_key']) {
+          sh '''
+            export IMAGE_URI="$IMAGE_URI"
+            export EC2_HOST="$EC2_HOST"
+            export EC2_USER="$EC2_USER"
+            bash scripts/deploy_ec2.sh
+          '''
+        }
+      }
+    }
+
+    stage('Smoke Test') {
+      steps {
+        sh '''
+          export APP_URL="http://$EC2_HOST:5000"
+          bash scripts/smoke_test.sh
+        '''
+      }
+    }
+  }
+
+  post {
+    always {
+      sh 'docker image prune -f || true'
+    }
+  }
+}
